@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Board Finder — Chess-Results pairing lookup</title>
+<meta name="description" content="Look up board number, colour and opponent for a list of players from a Chess-Results tournament." />
+<link rel="stylesheet" href="./styles.css" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>♟</text></svg>" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">♞</span>
+      <div>
+        <h1>Board Finder</h1>
+        <p class="brand-sub">Board · Colour · Opponent, for your players</p>
+      </div>
+    </div>
+    <button id="themeBtn" class="icon-btn" type="button" title="Toggle theme" aria-label="Toggle colour theme">◐</button>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- ── Step 1: tournament ─────────────────────────────────────────── -->
+  <section class="card" aria-labelledby="s1">
+    <div class="card-head">
+      <span class="step">1</span>
+      <h2 id="s1">Tournament</h2>
+    </div>
+
+    <label class="field">
+      <span class="label">Chess-Results URL</span>
+      <div class="row">
+        <input id="urlInput" type="url" spellcheck="false" autocomplete="off"
+               placeholder="https://chess-results.com/tnr1444215.aspx?lan=1&amp;art=0" />
+        <button id="loadBtn" class="btn primary" type="button">Load</button>
+      </div>
+      <p class="hint">Paste any page of the tournament — the tournament number is all that matters.</p>
+    </label>
+
+    <div id="tournamentBox" class="tournament hidden" aria-live="polite">
+      <div class="tournament-name" id="tName"></div>
+      <div class="tournament-meta">
+        <span class="pill" id="tPlayers"></span>
+        <span class="pill" id="tId"></span>
+        <label class="round-picker">
+          <span class="label-inline">Round</span>
+          <select id="roundSelect"></select>
+        </label>
+        <button id="refreshBtn" class="btn ghost small" type="button" title="Re-fetch the latest pairings">↻ Refresh</button>
+      </div>
+      <div id="roundInfo" class="round-info"></div>
+    </div>
+  </section>
+
+  <!-- ── Step 2: players ────────────────────────────────────────────── -->
+  <section class="card" aria-labelledby="s2">
+    <div class="card-head">
+      <span class="step">2</span>
+      <h2 id="s2">Your players</h2>
+    </div>
+
+    <label class="field">
+      <span class="label">AICF IDs or names — one per line</span>
+      <textarea id="playersInput" rows="7" spellcheck="false" autocomplete="off"
+placeholder="35952021
+Priyanka Nutakki
+167812021
+Kheerthi Ganta"></textarea>
+      <p class="hint">
+        Accepts AICF ID, FIDE ID, player name, or <code>#12</code> for a starting number.
+        Commas and semicolons work as separators too.
+      </p>
+    </label>
+
+    <div class="row end">
+      <button id="clearBtn" class="btn ghost" type="button">Clear</button>
+      <button id="findBtn" class="btn primary" type="button">Find pairings</button>
+    </div>
+  </section>
+
+  <!-- ── Status ─────────────────────────────────────────────────────── -->
+  <div id="status" class="status hidden" role="status" aria-live="polite"></div>
+
+  <!-- ── Results ────────────────────────────────────────────────────── -->
+  <section id="resultsCard" class="card hidden" aria-labelledby="s3">
+    <div class="card-head">
+      <span class="step">3</span>
+      <h2 id="s3">Pairings</h2>
+      <div class="head-actions">
+        <button id="copyBtn" class="btn ghost small" type="button">Copy</button>
+        <button id="csvBtn" class="btn ghost small" type="button">CSV</button>
+      </div>
+    </div>
+
+    <div id="summary" class="summary"></div>
+    <div class="table-scroll">
+      <table id="resultsTable" class="results">
+        <thead>
+          <tr>
+            <th scope="col">Player</th>
+            <th scope="col" class="num">Board</th>
+            <th scope="col">Colour</th>
+            <th scope="col">Opponent</th>
+            <th scope="col">Result</th>
+          </tr>
+        </thead>
+        <tbody id="resultsBody"></tbody>
+      </table>
+    </div>
+
+    <div id="unmatched" class="unmatched hidden"></div>
+  </section>
+
+  <!-- ── Advanced ───────────────────────────────────────────────────── -->
+  <details class="card advanced">
+    <summary>Advanced — network settings</summary>
+    <p class="hint">
+      Chess-Results does not send CORS headers, so a public relay is used to read the page.
+      Public relays are rate-limited and occasionally time out. If lookups keep failing,
+      add your own relay (for example a Cloudflare Worker) below — use <code>{url}</code>
+      where the encoded target URL should go.
+    </p>
+    <label class="field">
+      <span class="label">Custom relay template</span>
+      <div class="row">
+        <input id="proxyInput" type="text" spellcheck="false" autocomplete="off"
+               placeholder="https://my-worker.workers.dev/?url={url}" />
+        <button id="proxySaveBtn" class="btn ghost" type="button">Save</button>
+      </div>
+    </label>
+    <p class="hint" id="proxyStatus"></p>
+  </details>
+
+</main>
+
+<footer class="wrap foot">
+  <p>Reads public data from chess-results.com. Nothing is stored on a server — your player list stays in this browser.</p>
+</footer>
+
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>
