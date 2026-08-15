@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 const el = {
   url: $('urlInput'), load: $('loadBtn'),
   tBox: $('tournamentBox'), tName: $('tName'), tPlayers: $('tPlayers'), tId: $('tId'),
-  round: $('roundSelect'), roundInfo: $('roundInfo'), refresh: $('refreshBtn'),
+  round: $('roundSelect'), roundInfo: $('roundInfo'), dataInfo: $('dataInfo'), refresh: $('refreshBtn'),
   autoChk: $('autoChk'), autoStatus: $('autoStatus'),
   players: $('playersInput'), find: $('findBtn'), clear: $('clearBtn'),
   status: $('status'),
@@ -77,7 +77,7 @@ function reporter(silent) {
 
 /* ── Loading ─────────────────────────────────────────────────────────── */
 
-async function loadTournament({ force = false, silent = false } = {}) {
+async function loadTournament({ force = false, silent = false, bust = false } = {}) {
   const say = reporter(silent);
   const tnr = parseTournamentNumber(el.url.value);
   if (!tnr) {
@@ -90,6 +90,7 @@ async function loadTournament({ force = false, silent = false } = {}) {
   try {
     const html = await fetchPage(tnr, { art: 0 }, {
       force,
+      bust,
       onProgress: (m) => say(m, '', true),
     });
     const parsed = parseStartingRank(html);
@@ -105,6 +106,7 @@ async function loadTournament({ force = false, silent = false } = {}) {
 
     // renderRoundOptions drops a selected round that this tournament lacks.
     renderTournament();
+    if (!state.round) showDataAge(parsed.lastUpdate);
     say('');
     state.auto.lastError = '';
     persist();
@@ -167,7 +169,7 @@ async function findPairings(opts = {}) {
   if (followUp) await runPairings({ ...opts, followed: true });
 }
 
-async function runPairings({ force = false, silent = false, followed = false } = {}) {
+async function runPairings({ force = false, silent = false, followed = false, bust = false } = {}) {
   const say = reporter(silent);
   const queries = splitQueries(el.players.value);
   if (!queries.length) {
@@ -177,7 +179,7 @@ async function runPairings({ force = false, silent = false, followed = false } =
   }
 
   if (!state.tournament || parseTournamentNumber(el.url.value) !== state.tnr) {
-    const loaded = await loadTournament({ force, silent });
+    const loaded = await loadTournament({ force, silent, bust });
     if (!loaded) return false;
   }
 
@@ -191,6 +193,7 @@ async function runPairings({ force = false, silent = false, followed = false } =
   try {
     const html = await fetchPage(state.tnr, { art: 2, rd: state.round }, {
       force,
+      bust,
       onProgress: (m) => say(m, '', true),
     });
     const parsed = parsePairings(html);
@@ -209,6 +212,7 @@ async function runPairings({ force = false, silent = false, followed = false } =
 
     state.roundLabel = parsed.roundLabel;
     el.roundInfo.textContent = parsed.roundLabel;
+    showDataAge(parsed.lastUpdate);
 
     render(buildRows(queries, parsed.pairings));
     say('');
@@ -353,6 +357,18 @@ function colourChip(colour) {
   piece.textContent = white ? '♔' : '♚';
   span.append(piece, document.createTextNode(white ? 'Wh' : 'Bl'));
   return span;
+}
+
+/**
+ * Show when the arbiter last uploaded, and when we read it. Board numbers move
+ * when a round is re-paired, so both halves matter: the first says how current
+ * Chess-Results is, the second how current our copy of it is.
+ */
+function showDataAge(lastUpdate) {
+  const read = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  el.dataInfo.textContent = lastUpdate
+    ? `Pairings uploaded ${lastUpdate} · read at ${read}`
+    : `Read at ${read}`;
 }
 
 /** Human wording for a forfeit, from this player's side. */
@@ -714,7 +730,9 @@ el.load.addEventListener('click', async () => {
 });
 
 el.find.addEventListener('click', async () => {
-  await findPairings();
+  // Pressing the button is a request for current data, not for whatever was
+  // cached — the tournament page itself is only refetched if it is not loaded.
+  await findPairings({ force: true });
   resetAuto();
 });
 
@@ -722,8 +740,9 @@ el.refresh.addEventListener('click', async () => {
   clearCache();
   state.auto.lastChange = '';
   const before = fingerprint();
-  if (splitQueries(el.players.value).length) await findPairings({ force: true });
-  else await loadTournament({ force: true });
+  // bust: an explicit Refresh must also get past the relay's own cache.
+  if (splitQueries(el.players.value).length) await findPairings({ force: true, bust: true });
+  else await loadTournament({ force: true, bust: true });
   if (fingerprint() !== before) {
     state.auto.lastChange = `Updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
   }
@@ -733,7 +752,7 @@ el.refresh.addEventListener('click', async () => {
 el.round.addEventListener('change', async () => {
   state.round = Number(el.round.value) || null;
   state.auto.lastChange = '';
-  if (el.players.value.trim()) await findPairings();
+  if (el.players.value.trim()) await findPairings({ force: true });
   resetAuto();
 });
 

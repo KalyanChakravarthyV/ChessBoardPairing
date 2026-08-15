@@ -35,6 +35,14 @@ const ATTEMPT_TIMEOUT_MS = 20000;
 const WAVE_SIZE = 4;
 const DEADLINE_MS = 95000;
 
+/**
+ * Pairings are live data — an arbiter re-pairing a round moves board numbers.
+ * Cached pages therefore expire quickly; without this a page fetched once was
+ * reused for the lifetime of the tab, so a stale board number could survive
+ * every action except an explicit Refresh.
+ */
+const MEMO_TTL_MS = 60_000;
+
 const memo = new Map();
 
 /** A user-supplied relay (e.g. their own Cloudflare Worker) takes priority. */
@@ -81,15 +89,18 @@ function looksLikeChessResults(text) {
  * different mirrors — hitting one relay four times over just trips its
  * rate limiter.
  */
-function candidates(tnr, params) {
+function candidates(tnr, params, stamp) {
   const list = relays();
+  // Relays cache too. A throwaway parameter — ignored by Chess-Results — makes
+  // the target look like a new resource so an explicit Refresh really is fresh.
+  const query = stamp ? { ...params, _: stamp } : params;
   const out = [];
   for (let i = 0; i < list.length * MIRRORS.length; i++) {
     const relay = list[i % list.length];
     const host = MIRRORS[Math.floor(i / list.length) % MIRRORS.length];
     out.push({
       label: `${relay.name}/${host.split('.')[0]}`,
-      url: buildRelayUrl(relay.tpl, crUrl(host, tnr, params)),
+      url: buildRelayUrl(relay.tpl, crUrl(host, tnr, query)),
     });
   }
   return out;
@@ -119,15 +130,18 @@ async function attempt(url, signal) {
  * @param {object}   params     extra query params, e.g. { art: 2, rd: 3 }
  * @param {object}   [opts]
  * @param {function} [opts.onProgress] called with a human-readable attempt note
- * @param {boolean}  [opts.force]      bypass the in-memory cache
+ * @param {boolean}  [opts.force]      ignore the cached copy
+ * @param {boolean}  [opts.bust]       also defeat the relay's own cache
  * @returns {Promise<string>} raw HTML
  */
 export async function fetchPage(tnr, params, opts = {}) {
-  const { onProgress = () => {}, force = false } = opts;
+  const { onProgress = () => {}, force = false, bust = false } = opts;
   const key = `${tnr}|${new URLSearchParams(params)}`;
-  if (!force && memo.has(key)) return memo.get(key);
 
-  const all = candidates(tnr, params);
+  const hit = memo.get(key);
+  if (!force && hit && Date.now() - hit.at < MEMO_TTL_MS) return hit.html;
+
+  const all = candidates(tnr, params, bust ? String(Date.now()) : null);
   const deadline = Date.now() + DEADLINE_MS;
   const errors = [];
   let done = 0;
@@ -149,7 +163,7 @@ export async function fetchPage(tnr, params, opts = {}) {
     try {
       const html = await Promise.any(tasks);
       ctrl.abort();               // stop the losers of the race
-      memo.set(key, html);
+      memo.set(key, { html, at: Date.now() });
       return html;
     } catch {
       // Whole wave failed; fall through to the next one.

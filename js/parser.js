@@ -85,6 +85,19 @@ function parseRounds(doc) {
   return [...rounds].sort((a, b) => a - b);
 }
 
+/**
+ * Chess-Results stamps every page with when the arbiter last uploaded.
+ * Surfacing it is the only way a reader can tell a re-paired round from a
+ * stale copy — board numbers move when a round is paired again.
+ */
+function parseLastUpdate(doc) {
+  for (const p of doc.querySelectorAll('p.CRsmall')) {
+    const m = txt(p).match(/Last update\s+([\d.]+\s+[\d:]+)/i);
+    if (m) return m[1];
+  }
+  return '';
+}
+
 function parseTournamentName(doc) {
   const skip = /^(pairings|results|starting rank|final ranking|alphabetical|statistics|ranking|team)/i;
   for (const h of doc.querySelectorAll('h2')) {
@@ -106,6 +119,7 @@ export function parseStartingRank(html) {
   const out = {
     name: parseTournamentName(doc),
     rounds: parseRounds(doc),
+    lastUpdate: parseLastUpdate(doc),
     players: [],
   };
   if (!table) return out;
@@ -162,6 +176,7 @@ export function parsePairings(html) {
   const out = {
     roundLabel: '',
     rounds: parseRounds(doc),
+    lastUpdate: parseLastUpdate(doc),
     pairings: [],
     published: false,
   };
