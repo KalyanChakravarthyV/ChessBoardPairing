@@ -51,9 +51,15 @@
           <span class="label-inline">Round</span>
           <select id="roundSelect"></select>
         </label>
-        <button id="refreshBtn" class="btn ghost small" type="button" title="Re-fetch the latest pairings">↻ Refresh</button>
+        <button id="refreshBtn" class="btn ghost small" type="button" title="Re-fetch now and restart the auto-refresh interval">↻ Refresh</button>
+        <label class="switch" title="Keep checking for new pairings, waiting longer after each unchanged check">
+          <input type="checkbox" id="autoChk" />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+          <span class="switch-text">Auto-refresh</span>
+        </label>
       </div>
       <div id="roundInfo" class="round-info"></div>
+      <div id="autoStatus" class="auto-status"></div>
     </div>
   </section>
 

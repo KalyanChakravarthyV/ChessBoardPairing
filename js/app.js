@@ -8,6 +8,7 @@ const el = {
   url: $('urlInput'), load: $('loadBtn'),
   tBox: $('tournamentBox'), tName: $('tName'), tPlayers: $('tPlayers'), tId: $('tId'),
   round: $('roundSelect'), roundInfo: $('roundInfo'), refresh: $('refreshBtn'),
+  autoChk: $('autoChk'), autoStatus: $('autoStatus'),
   players: $('playersInput'), find: $('findBtn'), clear: $('clearBtn'),
   status: $('status'),
   resultsCard: $('resultsCard'), body: $('resultsBody'), summary: $('summary'),
@@ -17,6 +18,13 @@ const el = {
   proxy: $('proxyInput'), proxySave: $('proxySaveBtn'), proxyStatus: $('proxyStatus'),
 };
 
+/* Auto-refresh backs off after every check that finds nothing new, so a page
+ * left open all day settles into occasional polling instead of hammering the
+ * relays. Pressing Refresh puts it back to the fast interval. */
+const AUTO_BASE_MS = 30_000;
+const AUTO_FACTOR = 1.6;
+const AUTO_MAX_MS = 900_000;   // 15 minutes
+
 const state = {
   tnr: null,
   tournament: null,   // { name, rounds, players }
@@ -24,17 +32,28 @@ const state = {
   round: null,
   roundLabel: '',
   rows: [],           // rendered result rows
+  busy: false,
+  auto: {
+    on: false,
+    delay: AUTO_BASE_MS,
+    dueAt: 0,
+    timer: null,
+    ticker: null,
+    lastError: '',
+    lastChange: '',
+    missedWhileHidden: false,
+  },
 };
 
 const DEFAULT_URL = 'https://s3.chess-results.com/tnr1444215.aspx?lan=1&art=0&SNode=S0&tno=1444215&zeilen=99999';
 
 /* ── Status helpers ──────────────────────────────────────────────────── */
 
-function setStatus(msg, kind = '', busy = false) {
+function setStatus(msg, kind = '', spinning = false) {
   if (!msg) { el.status.classList.add('hidden'); el.status.textContent = ''; return; }
   el.status.className = `status ${kind}`.trim();
   el.status.innerHTML = '';
-  if (busy) {
+  if (spinning) {
     const s = document.createElement('span');
     s.className = 'spinner';
     el.status.append(s);
@@ -42,30 +61,41 @@ function setStatus(msg, kind = '', busy = false) {
   el.status.append(document.createTextNode(msg));
 }
 
-function busy(on) {
-  for (const b of [el.load, el.find, el.refresh]) b.disabled = on;
+function setBusy(on, { silent = false } = {}) {
+  state.busy = on;
+  if (!silent) for (const b of [el.load, el.find, el.refresh]) b.disabled = on;
+  if (state.auto.on) renderAutoStatus();
+}
+
+/** Route progress messages to the main bar, or to the quiet line when polling. */
+function reporter(silent) {
+  return (msg, kind = '', spinning = false) => {
+    if (!silent) setStatus(msg, kind, spinning);
+    else if (kind === 'error') state.auto.lastError = msg;
+  };
 }
 
 /* ── Loading ─────────────────────────────────────────────────────────── */
 
-async function loadTournament({ force = false } = {}) {
+async function loadTournament({ force = false, silent = false } = {}) {
+  const say = reporter(silent);
   const tnr = parseTournamentNumber(el.url.value);
   if (!tnr) {
-    setStatus('That does not look like a Chess-Results tournament link. Expected something like …/tnr1444215.aspx…', 'error');
+    say('That does not look like a Chess-Results tournament link. Expected something like …/tnr1444215.aspx…', 'error');
     return false;
   }
 
-  busy(true);
-  setStatus('Loading tournament…', '', true);
+  setBusy(true, { silent });
+  say('Loading tournament…', '', true);
   try {
     const html = await fetchPage(tnr, { art: 0 }, {
       force,
-      onProgress: (m) => setStatus(m, '', true),
+      onProgress: (m) => say(m, '', true),
     });
     const parsed = parseStartingRank(html);
 
     if (!parsed.players.length) {
-      setStatus('Loaded the page but found no player list. Check the tournament number.', 'error');
+      say('Loaded the page but found no player list. Check the tournament number.', 'error');
       return false;
     }
 
@@ -73,16 +103,18 @@ async function loadTournament({ force = false } = {}) {
     state.tournament = parsed;
     state.index = buildIndex(parsed.players);
 
+    // renderRoundOptions drops a selected round that this tournament lacks.
     renderTournament();
-    setStatus('');
+    say('');
+    state.auto.lastError = '';
     persist();
     return true;
   } catch (err) {
-    setStatus(err.message, 'error');
+    say(err.message, 'error');
     if (err.detail) console.warn('Relay attempts:', err.detail);
     return false;
   } finally {
-    busy(false);
+    setBusy(false, { silent });
   }
 }
 
@@ -92,9 +124,13 @@ function renderTournament() {
   el.tName.textContent = t.name || `Tournament ${state.tnr}`;
   el.tPlayers.textContent = `${t.players.length} players`;
   el.tId.textContent = `tnr${state.tnr}`;
+  renderRoundOptions();
+}
 
-  const rounds = t.rounds;
+function renderRoundOptions() {
+  const rounds = state.tournament.rounds;
   el.round.innerHTML = '';
+
   if (!rounds.length) {
     const o = document.createElement('option');
     o.textContent = 'No pairings published yet';
@@ -113,62 +149,103 @@ function renderTournament() {
     o.textContent = `Round ${r}`;
     el.round.append(o);
   }
-  // Default to the latest published round, or whatever was restored from the URL.
+  // Default to the latest published round, or whatever was restored/selected.
   const wanted = rounds.includes(state.round) ? state.round : rounds[rounds.length - 1];
   state.round = wanted;
   el.round.value = String(wanted);
-  el.roundInfo.textContent = '';
 }
 
 /* ── Lookup ──────────────────────────────────────────────────────────── */
 
-async function findPairings({ force = false } = {}) {
+/**
+ * Look up the round, following a newly published one if the user was already
+ * watching the latest. Split in two so the follow-up fetch starts only after
+ * the first has fully released the busy flag.
+ */
+async function findPairings(opts = {}) {
+  const followUp = await runPairings(opts);
+  if (followUp) await runPairings({ ...opts, followed: true });
+}
+
+async function runPairings({ force = false, silent = false, followed = false } = {}) {
+  const say = reporter(silent);
   const queries = splitQueries(el.players.value);
   if (!queries.length) {
-    setStatus('Add at least one AICF ID or name in step 2.', 'warn');
-    el.players.focus();
-    return;
+    say('Add at least one AICF ID or name in step 2.', 'warn');
+    if (!silent) el.players.focus();
+    return false;
   }
 
   if (!state.tournament || parseTournamentNumber(el.url.value) !== state.tnr) {
-    const ok = await loadTournament({ force });
-    if (!ok) return;
+    const loaded = await loadTournament({ force, silent });
+    if (!loaded) return false;
   }
 
   if (!state.round) {
-    setStatus('No round has been published for this tournament yet.', 'warn');
-    return;
+    say('No round has been published for this tournament yet.', 'warn');
+    return false;
   }
 
-  busy(true);
-  setStatus(`Loading round ${state.round} pairings…`, '', true);
+  setBusy(true, { silent });
+  say(`Loading round ${state.round} pairings…`, '', true);
   try {
     const html = await fetchPage(state.tnr, { art: 2, rd: state.round }, {
       force,
-      onProgress: (m) => setStatus(m, '', true),
+      onProgress: (m) => say(m, '', true),
     });
     const parsed = parsePairings(html);
+
+    // The pairing page also carries the round navigation, so a round published
+    // since the tournament was loaded shows up here first.
+    if (mergeRounds(parsed.rounds) && !followed) return true;
 
     // A round can be listed before its pairings are actually out.
     if (!parsed.pairings.length) {
       state.rows = [];
       el.resultsCard.classList.add('hidden');
-      setStatus(`Round ${state.round} is listed but its pairings are not published yet.`, 'warn');
-      return;
+      say(`Round ${state.round} is listed but its pairings are not published yet.`, 'warn');
+      return false;
     }
 
     state.roundLabel = parsed.roundLabel;
     el.roundInfo.textContent = parsed.roundLabel;
 
     render(buildRows(queries, parsed.pairings));
-    setStatus('');
+    say('');
+    state.auto.lastError = '';
     persist();
   } catch (err) {
-    setStatus(err.message, 'error');
+    say(err.message, 'error');
     if (err.detail) console.warn('Relay attempts:', err.detail);
   } finally {
-    busy(false);
+    setBusy(false, { silent });
   }
+  return false;
+}
+
+/**
+ * Fold a freshly seen round list into the tournament.
+ * @returns {boolean} true if the view should follow a newly published round.
+ */
+function mergeRounds(rounds) {
+  if (!rounds.length || !state.tournament) return false;
+  const known = state.tournament.rounds;
+  if (rounds.join() === known.join()) return false;
+
+  // Only follow the new round if the user was already watching the latest one;
+  // someone deliberately looking at round 3 should stay on round 3.
+  const wasOnLatest = state.round === known[known.length - 1];
+  state.tournament.rounds = rounds;
+  renderRoundOptions();
+
+  const latest = rounds[rounds.length - 1];
+  if (wasOnLatest && latest > state.round) {
+    state.round = latest;
+    el.round.value = String(latest);
+    state.auto.lastChange = `Round ${latest} published`;
+    return true;
+  }
+  return false;
 }
 
 /** Join resolved players to their pairing for the round. */
@@ -328,7 +405,6 @@ function render(rows) {
 
   if (problems.length) renderProblems(problems);
   el.resultsCard.classList.remove('hidden');
-  if (found.length) el.resultsCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 function renderProblems(problems) {
@@ -375,6 +451,117 @@ function appendSuggestions(li, candidates) {
   });
   li.append(document.createTextNode('?'));
 }
+
+/* ── Auto-refresh ────────────────────────────────────────────────────── */
+
+/** Compact signature of what is on screen, to tell a real change from a no-op. */
+function fingerprint() {
+  const rounds = state.tournament ? state.tournament.rounds.join(',') : '';
+  const rows = state.rows
+    .map((r) => (r.kind === 'pair' || r.kind === 'bye'
+      ? `${r.player.snr}:${r.board}:${r.colour}:${r.opponent ? r.opponent.snr : ''}:${r.result}`
+      : `${r.kind}:${r.query}`))
+    .join('|');
+  return `${state.round}#${rounds}#${rows}`;
+}
+
+function fmtDuration(ms) {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return s % 60 ? `${m}m ${String(s % 60).padStart(2, '0')}s` : `${m}m`;
+}
+
+function renderAutoStatus() {
+  const a = state.auto;
+  if (!a.on) { el.autoStatus.textContent = ''; el.autoStatus.className = 'auto-status'; return; }
+
+  if (state.busy) {
+    el.autoStatus.textContent = 'Checking for updates…';
+    el.autoStatus.className = 'auto-status live';
+    return;
+  }
+
+  const bits = [];
+  let kind = '';
+  if (a.lastError) { bits.push('Last check failed'); kind = 'warn'; }
+  else if (a.lastChange) { bits.push(a.lastChange); kind = 'live'; }
+  bits.push(`next check in ${fmtDuration(a.dueAt - Date.now())}`);
+  bits.push(`interval ${fmtDuration(a.delay)}`);
+
+  el.autoStatus.textContent = bits.join(' · ');
+  el.autoStatus.className = `auto-status ${kind}`.trim();
+}
+
+function cancelAuto() {
+  clearTimeout(state.auto.timer);
+  clearInterval(state.auto.ticker);
+  state.auto.timer = null;
+  state.auto.ticker = null;
+}
+
+function scheduleAuto() {
+  cancelAuto();
+  const a = state.auto;
+  if (!a.on || !state.tnr) { renderAutoStatus(); return; }
+
+  a.dueAt = Date.now() + a.delay;
+  a.timer = setTimeout(autoTick, a.delay);
+  a.ticker = setInterval(renderAutoStatus, 1000);
+  renderAutoStatus();
+}
+
+/** Back to the fast interval — used for anything the user did deliberately. */
+function resetAuto() {
+  state.auto.delay = AUTO_BASE_MS;
+  state.auto.lastError = '';
+  scheduleAuto();
+}
+
+async function autoTick() {
+  const a = state.auto;
+  if (!a.on) return;
+
+  // Don't spend a relay attempt on a tab nobody is looking at.
+  if (document.hidden) { a.missedWhileHidden = true; cancelAuto(); return; }
+  if (state.busy) { scheduleAuto(); return; }
+
+  const before = fingerprint();
+  const hasPlayers = splitQueries(el.players.value).length > 0;
+
+  if (!state.round || !hasPlayers) await loadTournament({ force: true, silent: true });
+  if (state.round && hasPlayers) await findPairings({ force: true, silent: true });
+
+  if (fingerprint() !== before) {
+    const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    // mergeRounds may already have set a more specific message.
+    if (!a.lastChange || !a.lastChange.startsWith('Round ')) a.lastChange = `Updated ${t}`;
+  }
+
+  // Grow the wait. Only the Refresh button (or another deliberate action)
+  // brings it back down.
+  a.delay = Math.min(Math.round(a.delay * AUTO_FACTOR), AUTO_MAX_MS);
+  scheduleAuto();
+}
+
+function setAuto(on) {
+  state.auto.on = on;
+  el.autoChk.checked = on;
+  try { localStorage.setItem('cbp.auto', on ? '1' : '0'); } catch { /* ignore */ }
+  if (on) resetAuto();
+  else { cancelAuto(); renderAutoStatus(); }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || !state.auto.on) return;
+  // Catch up on a check that came due while the tab was in the background.
+  if (state.auto.missedWhileHidden) {
+    state.auto.missedWhileHidden = false;
+    autoTick();
+  } else if (!state.auto.timer) {
+    scheduleAuto();
+  }
+});
 
 /* ── Export ──────────────────────────────────────────────────────────── */
 
@@ -477,7 +664,9 @@ function restore() {
   try {
     const theme = localStorage.getItem('cbp.theme');
     if (theme) document.documentElement.dataset.theme = theme;
-  } catch { /* ignore */ }
+    state.auto.on = localStorage.getItem('cbp.auto') !== '0';
+  } catch { state.auto.on = true; }
+  el.autoChk.checked = state.auto.on;
 }
 
 function updateProxyStatus() {
@@ -487,30 +676,52 @@ function updateProxyStatus() {
 
 /* ── Wiring ──────────────────────────────────────────────────────────── */
 
-el.load.addEventListener('click', () => loadTournament({ force: true }));
-el.find.addEventListener('click', () => findPairings());
-el.refresh.addEventListener('click', () => { clearCache(); findPairings({ force: true }); });
-
-el.round.addEventListener('change', () => {
-  state.round = Number(el.round.value) || null;
-  if (el.players.value.trim()) findPairings();
+el.load.addEventListener('click', async () => {
+  if (await loadTournament({ force: true })) resetAuto();
 });
+
+el.find.addEventListener('click', async () => {
+  await findPairings();
+  resetAuto();
+});
+
+el.refresh.addEventListener('click', async () => {
+  clearCache();
+  state.auto.lastChange = '';
+  const before = fingerprint();
+  if (splitQueries(el.players.value).length) await findPairings({ force: true });
+  else await loadTournament({ force: true });
+  if (fingerprint() !== before) {
+    state.auto.lastChange = `Updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  }
+  resetAuto();
+});
+
+el.round.addEventListener('change', async () => {
+  state.round = Number(el.round.value) || null;
+  state.auto.lastChange = '';
+  if (el.players.value.trim()) await findPairings();
+  resetAuto();
+});
+
+el.autoChk.addEventListener('change', () => setAuto(el.autoChk.checked));
 
 el.clear.addEventListener('click', () => {
   el.players.value = '';
   el.resultsCard.classList.add('hidden');
+  state.rows = [];
   setStatus('');
   persist();
   el.players.focus();
 });
 
 el.url.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); loadTournament({ force: true }); }
+  if (e.key === 'Enter') { e.preventDefault(); el.load.click(); }
 });
 
 // Ctrl/Cmd+Enter from the textarea runs the lookup.
 el.players.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); findPairings(); }
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); el.find.click(); }
 });
 
 el.copy.addEventListener('click', copyText);

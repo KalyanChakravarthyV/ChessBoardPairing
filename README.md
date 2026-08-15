@@ -39,6 +39,38 @@ GitHub Pages as-is.
    **Copy** puts a plain-text list on the clipboard; **CSV** downloads a
    spreadsheet.
 
+### Auto-refresh
+
+Leave the page open during an event and it keeps checking for you. This is the
+point of the feature: you open it before round 1 is out, and it tells you the
+boards when they appear.
+
+The wait grows after every check that finds nothing new — 30s, 48s, 77s, 2m,
+… up to a 15-minute ceiling — so a page left open all day settles into
+occasional polling instead of hammering the relays. The status line under the
+round always says what it is doing:
+
+```
+next check in 48s · interval 48s
+Round 1 published · next check in 30s · interval 30s
+Last check failed · next check in 2m 03s · interval 2m 03s
+```
+
+**Pressing Refresh puts the interval back to 30 seconds.** So does loading a
+tournament, running a lookup, or changing round — anything you did on purpose.
+Nothing else resets it; the backoff keeps growing on its own.
+
+Two more behaviours worth knowing:
+
+- **It follows a new round.** If a later round is published while you are
+  watching the latest one, the app switches to it and says `Round N published`.
+  If you have deliberately selected an *older* round, it leaves you there.
+- **It pauses on a hidden tab** and checks once when you come back, rather than
+  spending relay attempts on a window nobody is looking at.
+
+The toggle is remembered per browser. Turn it off if you would rather refresh
+by hand.
+
 The tournament link, your player list and the theme are remembered in the
 browser. The address bar carries `?tnr=…&rd=…`, so a round is bookmarkable and
 shareable.
@@ -96,39 +128,31 @@ passes — up to 50 attempts. In practice one gets through, but at busy times
 every relay can fail at once. Waiting a minute and pressing **Refresh** usually
 clears it.
 
-**For anything you depend on, run your own relay.** A Cloudflare Worker on the
-free tier is enough and removes the rate limits entirely:
+**For anything you depend on, run your own relay.** [`worker/`](worker/) is a
+complete Cloudflare Worker that does the job; the free tier is far more than
+enough. Measured against the same page, it returned in **1.2s cold and 5ms
+cached**, where public relays took 12–40s or failed outright.
 
-```js
-export default {
-  async fetch(request) {
-    const target = new URL(request.url).searchParams.get('url');
-    if (!target || !/^https:\/\/([a-z0-9]+\.)?chess-results\.com\//.test(target)) {
-      return new Response('bad target', { status: 400 });
-    }
-    const upstream = await fetch(target, {
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept-Language': 'en' },
-    });
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers: {
-        'Content-Type': upstream.headers.get('Content-Type') ?? 'text/html',
-        'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'public, max-age=60',
-      },
-    });
-  },
-};
+```sh
+cd worker
+npx wrangler deploy      # first run opens a browser to log in to Cloudflare
 ```
 
-Deploy it, then paste the template into **Advanced → network settings**:
+Then paste the URL it prints into **Advanced → network settings**, with
+`?url={url}` on the end:
 
 ```
-https://your-worker.workers.dev/?url={url}
+https://chess-results-relay.<your-subdomain>.workers.dev/?url={url}
 ```
 
 `{url}` is replaced with the percent-encoded target (`{raw}` for unencoded).
 The setting is stored in your browser and takes priority over the public relays.
+
+The Worker only forwards to `chess-results.com` and its mirrors — without that
+allowlist it would be an open proxy for the whole internet. Once it works, set
+`ALLOWED_ORIGIN` in [`worker/wrangler.toml`](worker/wrangler.toml) to your own
+Pages origin so other sites cannot use it either. It edge-caches for 30s, which
+also shields Chess-Results from the auto-refresh polling.
 
 ---
 
@@ -136,10 +160,11 @@ The setting is stored in your browser and takes priority over the public relays.
 
 | File | Role |
 | --- | --- |
-| [`js/fetcher.js`](js/fetcher.js) | Relay × mirror rotation, retries, response validation, in-memory cache |
+| [`js/fetcher.js`](js/fetcher.js) | Relay × mirror rotation, parallel races, response validation, in-memory cache |
 | [`js/parser.js`](js/parser.js) | Turns Chess-Results HTML into players and pairings |
 | [`js/match.js`](js/match.js) | Resolves IDs and names to a player |
-| [`js/app.js`](js/app.js) | State, rendering, export |
+| [`js/app.js`](js/app.js) | State, rendering, auto-refresh, export |
+| [`worker/`](worker/) | Optional Cloudflare Worker relay |
 
 Two Chess-Results pages are read:
 
