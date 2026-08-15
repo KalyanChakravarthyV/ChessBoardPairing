@@ -4,5 +4,5 @@ compatibility_date = "2026-08-15"
 
 # Restrict the relay to your own site once it works. Leave it unset (or "*")
 # while testing from localhost.
-# [vars]
-# ALLOWED_ORIGIN = "https://kalyanchakravarthyv.github.io"
+[vars]
+ALLOWED_ORIGIN = "https://kalyanchakravarthyv.github.io"
