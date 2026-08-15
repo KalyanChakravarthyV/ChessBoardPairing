@@ -291,6 +291,8 @@ function buildRows(queries, pairings) {
       opponent: opponent ? state.index.bySnr.get(opponent.snr) || opponent : null,
       note: pairing.note,
       result: pairing.result,
+      unplayed: Boolean(pairing.unplayed),
+      ownRes: colour === 'W' ? pairing.whiteRes : pairing.blackRes,
     });
   }
   rows.duplicates = duplicates;
@@ -353,6 +355,30 @@ function colourChip(colour) {
   return span;
 }
 
+/** Human wording for a forfeit, from this player's side. */
+function forfeitLabel(ownRes) {
+  if (ownRes === '+') return 'forfeit win';
+  if (ownRes === '-') return 'forfeit loss';
+  return 'forfeit';
+}
+
+/** The Result cell: a score, or an unmistakable "no game was played". */
+function resultNode(r) {
+  if (!r.unplayed || r.kind === 'bye') {
+    return r.result && /\d|½/.test(r.result) ? r.result : '—';
+  }
+  const wrap = document.createElement('div');
+  wrap.className = 'pwrap';
+  const main = document.createElement('div');
+  main.className = 'nogame';
+  main.textContent = 'not played';
+  const sub = document.createElement('div');
+  sub.className = 'psub';
+  sub.textContent = forfeitLabel(r.ownRes);
+  wrap.append(main, sub);
+  return wrap;
+}
+
 function render(rows) {
   state.rows = rows;
   el.body.innerHTML = '';
@@ -364,7 +390,7 @@ function render(rows) {
 
   for (const r of found) {
     const tr = document.createElement('tr');
-    if (r.kind === 'bye') tr.className = 'row-bye';
+    if (r.kind === 'bye' || r.unplayed) tr.className = 'row-nogame';
 
     cell(tr, 'Player', playerCell(r.player, r.approx ? `matched "${r.query}"` : ''));
 
@@ -380,7 +406,7 @@ function render(rows) {
       td.style.color = 'var(--warn)';
     }
 
-    const res = cell(tr, 'Result', r.result && /\d|½/.test(r.result) ? r.result : '—');
+    const res = cell(tr, 'Result', resultNode(r));
     res.className = 'result-cell';
 
     el.body.append(tr);
@@ -389,11 +415,15 @@ function render(rows) {
   // Summary chips
   el.summary.innerHTML = '';
   const chips = [`Round ${state.round}`, `${found.length} found`];
-  const whites = found.filter((r) => r.kind === 'pair' && r.colour === 'W').length;
-  const blacks = found.filter((r) => r.kind === 'pair' && r.colour === 'B').length;
+  // Forfeits are excluded from the colour tally — nobody sat down to play them.
+  const playing = found.filter((r) => r.kind === 'pair' && !r.unplayed);
+  const whites = playing.filter((r) => r.colour === 'W').length;
+  const blacks = playing.filter((r) => r.colour === 'B').length;
   if (whites || blacks) chips.push(`${whites} white · ${blacks} black`);
   const byes = found.filter((r) => r.kind === 'bye').length;
   if (byes) chips.push(`${byes} not paired`);
+  const forfeits = found.filter((r) => r.kind === 'pair' && r.unplayed).length;
+  if (forfeits) chips.push(`${forfeits} not played`);
   if (problems.length) chips.push(`${problems.length} unresolved`);
   if (rows.duplicates) chips.push(`${rows.duplicates} duplicate${rows.duplicates > 1 ? 's' : ''} skipped`);
   for (const c of chips) {
@@ -574,17 +604,20 @@ function exportRows() {
       board: r.board == null ? '' : String(r.board),
       colour: r.kind === 'bye' ? '' : (r.colour === 'W' ? 'Wh' : 'Bl'),
       opponent: r.opponent ? r.opponent.name : (r.note || 'not paired'),
-      result: r.result || '',
+      result: r.kind === 'pair' && r.unplayed
+        ? `not played (${forfeitLabel(r.ownRes)})`
+        : (r.result || ''),
+      unplayed: r.kind === 'pair' && r.unplayed,
     }));
 }
 
 function asText() {
   const head = `${state.tournament?.name || ''}\n${state.roundLabel || `Round ${state.round}`}\n`;
-  const lines = exportRows().map((r) =>
-    r.colour
-      ? `${r.player} — Board ${r.board}, ${r.colour} vs ${r.opponent}`
-      : `${r.player} — ${r.opponent}`
-  );
+  const lines = exportRows().map((r) => {
+    if (!r.colour) return `${r.player} — ${r.opponent}`;
+    const line = `${r.player} — Board ${r.board}, ${r.colour} vs ${r.opponent}`;
+    return r.unplayed ? `${line} — ${r.result}` : line;
+  });
   return `${head}\n${lines.join('\n')}\n`;
 }
 

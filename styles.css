@@ -258,7 +258,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-
 .pwrap { min-width: 0; }
 
 .result-cell { font-family: var(--mono); font-size: 13px; color: var(--text-dim); white-space: nowrap; }
-.row-bye { background: var(--warn-bg); }
+.row-nogame { background: var(--warn-bg); }
+.nogame { color: var(--warn); font-weight: 600; white-space: nowrap; }
 
 /* ── Unmatched ──────────────────────────────────────────────────────── */
 .unmatched {

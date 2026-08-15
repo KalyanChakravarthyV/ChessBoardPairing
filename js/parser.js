@@ -18,6 +18,17 @@ const txt = (el) => (el ? el.textContent.replace(/\u00a0/g, ' ').trim() : '');
 /** Strip the "*)" annotation Chess-Results appends to some names. */
 const cleanName = (s) => s.replace(/\s*\*\)\s*$/, '').replace(/\s+/g, ' ').trim();
 
+/**
+ * Split a result cell into each player's token.
+ * "1 - 0" and "½ - ½" are played games; "+" and "-" mark a forfeit, where the
+ * pairing exists on paper but no game was played. "+ - -" is a White forfeit
+ * win, "- - +" a Black one — note the middle "-" is the separator, not a score.
+ */
+function splitResult(s) {
+  const m = String(s).match(/^\s*([01½+-])\s*-\s*([01½+-])\s*$/);
+  return m ? { white: m[1], black: m[2] } : null;
+}
+
 /** Extract the tournament number from a pasted URL or a bare number. */
 export function parseTournamentNumber(input) {
   const s = String(input || '').trim();
@@ -187,21 +198,34 @@ export function parsePairings(html) {
     const result = iResult >= 0 && row.cells[iResult] ? txt(row.cells[iResult]) : '';
 
     if (links.length >= 2) {
+      const parts = splitResult(result);
       out.pairings.push({
         board: Number.isFinite(board) ? board : null,
         white: asPlayer(links[0]),
         black: asPlayer(links[1]),
         result,
+        whiteRes: parts ? parts.white : '',
+        blackRes: parts ? parts.black : '',
+        // A forfeit still occupies a board on the pairing list, but nobody
+        // played it — reporting it as a normal assignment is misleading.
+        unplayed: parts ? /[+-]/.test(parts.white + parts.black) : false,
         note: '',
       });
     } else {
-      // Unpaired / bye: the second player cell is plain text such as "not paired".
-      const note = [...row.cells].map(txt).find((t) => /not paired|bye|½|free/i.test(t)) || 'not paired';
+      // Unpaired / bye. Read the note from the cells after the player's own,
+      // taking the first that contains letters — scanning for "½" instead would
+      // match the points column ("5½") long before reaching "not paired".
+      const cells = [...row.cells];
+      const afterPlayer = cells.slice(cells.findIndex((c) => c.contains(links[0])) + 1);
+      const note = afterPlayer.map(txt).find((t) => /[a-z]/i.test(t)) || 'not paired';
       out.pairings.push({
         board: null,
         white: asPlayer(links[0]),
         black: null,
         result: '',
+        whiteRes: '',
+        blackRes: '',
+        unplayed: true,
         note,
       });
     }
