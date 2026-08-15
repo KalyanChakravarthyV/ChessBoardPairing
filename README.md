@@ -28,10 +28,10 @@ GitHub Pages as-is.
    | Input | Example |
    | --- | --- |
    | AICF ID | `35952021` |
-   | FIDE ID | `5024366` |
-   | Name | `Priyanka Nutakki` |
-   | Name, any order | `Nutakki Priyanka` |
-   | Partial name | `Vikramjit` |
+   | FIDE ID | `5000017` |
+   | Name | `Magnus Carlsen` |
+   | Name, any order | `Carlsen Magnus` |
+   | Partial name | `Anand` |
    | Starting number | `#12` |
 
 3. **Find pairings** — pick the round from the dropdown (it defaults to the
